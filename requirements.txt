@@ -2,7 +2,6 @@ cachetools==4.2.4
 certifi==2025.4.26
 charset-normalizer==2.0.12
 click==8.0.4
-dataclasses==0.8
 Flask==2.0.3
 google-api-core==2.8.2
 google-api-python-client==2.52.0
