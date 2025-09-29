@@ -1,173 +1,166 @@
+# -*- coding: utf-8 -*-
 import os
-import json
-from datetime import datetime, timedelta, timezone
-
+import datetime
 import jwt
 import gspread
+import qrcode
+import io
+from flask import Flask, render_template, request, redirect, session, url_for, send_file
+from google_auth_oauthlib.flow import Flow
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
-from google_auth_oauthlib.flow import Flow
+from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
-from flask import Flask, redirect, url_for, session, request, render_template, abort, jsonify
-import qrcode
 
 # -----------------------------------------------------------------------------
 # 初期設定
 # -----------------------------------------------------------------------------
 app = Flask(__name__)
+# 環境変数からFlaskのシークレットキーを読み込む (セッション管理に必要)
 app.secret_key = os.environ.get('FLASK_SECRET_KEY', 'default-flask-secret-key')
-JWT_SECRET = os.environ.get('JWT_SECRET', 'default-jwt-secret-key')
-CRON_SECRET = os.environ.get('CRON_SECRET', 'default-cron-secret-key')
 
+# --- 設定項目 (環境変数から読み込む) ---
+# Google Cloudの認証情報ファイルへのパス (RenderのSecret Filesで設定)
 # Google OAuth 2.0 クライアント情報
 CLIENT_SECRETS_FILE = 'client_secrets.json'
+# スプレッドシートを操作するためのサービスアカウント認証情報 (RenderのSecret Filesで設定)
+SERVICE_ACCOUNT_FILE = 'credentials.json'
+# Google APIが要求する権限の範囲
 SCOPES = ['https://www.googleapis.com/auth/userinfo.profile', 'https://www.googleapis.com/auth/userinfo.email', 'openid']
+# Googleスプレッドシートの名前 (環境変数で設定)
+SPREADSHEET_NAME = os.environ.get('SPREADSHEET_NAME', '研究室出欠記録')
+# JWTトークンの暗号化に使う秘密鍵 (環境変数で設定)
+JWT_SECRET = os.environ.get('JWT_SECRET', 'default-jwt-secret-key')
 
-# Googleスプレッドシートの設定
-GSPREAD_CREDENTIALS_FILE = 'credentials.json'
-SPREADSHEET_NAME = '研究室出欠記録' # ★★★ あなたが作成したスプレッドシートの名前に書き換えてください ★★★
-
-# -----------------------------------------------------------------------------
-# QRコード生成ロジック (app.pyに統合)
-# -----------------------------------------------------------------------------
-def generate_attendance_qr_code():
-    """JWTトークンを含んだQRコードを生成し、static/today_qr.pngに保存します。"""
-    try:
-        # RenderのサーバーURLは動的に取得しないため、環境変数から読み込むか、固定で設定
-        # デプロイ後にRenderのURLをここに設定する
-        base_url = os.environ.get('RENDER_EXTERNAL_URL', 'http://127.0.0.1:5000')
-        qr_code_file_path = os.path.join('static', 'today_qr.png')
-
-        jst = timezone(timedelta(hours=+9), 'JST')
-        now = datetime.now(jst)
-        expiration_time = now.replace(hour=23, minute=59, second=59, microsecond=0)
-        
-        payload = {'iat': now, 'exp': expiration_time, 'iss': 'qr_attendance_system'}
-        token = jwt.encode(payload, JWT_SECRET, algorithm='HS256')
-        url = f"{base_url}/attend?token={token}"
-        
-        img = qrcode.make(url)
-        
-        dir_name = os.path.dirname(qr_code_file_path)
-        if not os.path.exists(dir_name):
-            os.makedirs(dir_name)
-            
-        img.save(qr_code_file_path)
-        print(f"QRコードが正常に生成されました。URL: {url}")
-        return True, url
-    except Exception as e:
-        print(f"QRコードの生成中にエラーが発生しました: {e}")
-        return False, str(e)
-
-# -----------------------------------------------------------------------------
-# ヘルパー関数 (変更なし)
-# -----------------------------------------------------------------------------
-def get_spreadsheet():
-    try:
-        gc = gspread.service_account(filename=GSPREAD_CREDENTIALS_FILE)
-        spreadsheet = gc.open(SPREADSHEET_NAME)
-        return spreadsheet.sheet1
-    except Exception as e:
-        print(f"スプレッドシートへのアクセス中にエラーが発生しました: {e}")
-        return None
-
-def record_attendance(user_info):
-    worksheet = get_spreadsheet()
-    if not worksheet: return False
-    try:
-        jst = timezone(timedelta(hours=+9), 'JST')
-        timestamp = datetime.now(jst).strftime('%Y-%m-%d %H:%M:%S')
-        email = user_info.get('email', 'N/A')
-        name = user_info.get('name', 'N/A')
-        worksheet.append_row([timestamp, email, name])
-        print(f"記録完了: {timestamp}, {email}, {name}")
-        return True
-    except Exception as e:
-        print(f"出席の記録中にエラーが発生しました: {e}")
-        return False
-
-# -----------------------------------------------------------------------------
-# Flaskルーティング
-# -----------------------------------------------------------------------------
+# --- メインページ ---
 @app.route('/')
 def index():
-    import time
-    qr_url = url_for('static', filename='today_qr.png', t=time.time())
-    return render_template('index.html', qr_code_url=qr_url)
+    """
+    QRコード画像を表示するメインページ。
+    HTML側で /qr_image.png を読み込むことで、動的にQRコードが生成される。
+    """
+    return render_template('index.html')
 
-# ★★★ 新しいルート：Cronジョブ用のQR生成トリガー ★★★
-@app.route('/cron/generate-qr')
-def trigger_qr_generation():
-    # クエリパラメータで秘密のキーをチェック
-    if request.args.get('secret') != CRON_SECRET:
-        return "Unauthorized", 401
-    
-    success, message = generate_attendance_qr_code()
-    if success:
-        return jsonify({"status": "success", "url": message}), 200
-    else:
-        return jsonify({"status": "error", "message": message}), 500
+# --- 動的なQRコード画像生成 ---
+@app.route('/qr_image.png')
+def qr_image():
+    """
+    アクセスされるたびに、その日有効なQRコード画像を動的に生成して返す。
+    ファイルとしては保存しない。
+    """
+    try:
+        # 日本時間のタイムゾーンを設定
+        jst = datetime.timezone(datetime.timedelta(hours=9))
+        
+        # 今日の終わりの時刻（有効期限）を計算
+        now = datetime.datetime.now(jst)
+        expiration_time = now.replace(hour=23, minute=59, second=59, microsecond=0)
+        
+        # JWTトークンのペイロードを作成
+        payload = {
+            'exp': expiration_time,
+            'iat': now
+        }
+        
+        # JWTトークンを生成
+        token = jwt.encode(payload, JWT_SECRET, algorithm='HS256')
+        
+        # RenderサーバーのURLを自動で取得し、QRコードに含めるURLを生成
+        base_url = request.host_url
+        qr_url = f"{base_url}attend?token={token}"
 
-# attend, login, callback, process_attendance, success, logoutルートは変更なし
+        # QRコードを生成
+        qr_img = qrcode.make(qr_url)
+        
+        # 画像をファイルに保存せず、メモリ上のバッファに保存
+        img_io = io.BytesIO()
+        qr_img.save(img_io, 'PNG')
+        img_io.seek(0)
+        
+        # メモリ上の画像データを、PNG画像としてブラウザに返す
+        return send_file(img_io, mimetype='image/png')
+
+    except Exception as e:
+        print(f"Error generating QR code: {e}")
+        # エラーが発生した場合は、プレースホルダー画像を返すかエラーメッセージを表示
+        return "Error generating QR code", 500
+
+
+# --- 打刻処理の開始 ---
 @app.route('/attend')
 def attend():
+    """
+    QRコードからアクセスされた際の最初の受付窓口。
+    トークンを検証し、Google認証へリダイレクトする。
+    """
     token = request.args.get('token')
-    if not token: return "エラー: トークンがありません。", 400
+    if not token:
+        return "エラー: トークンがありません。", 400
+
     try:
+        # トークンの検証
         jwt.decode(token, JWT_SECRET, algorithms=['HS256'])
-        session['attendance_pending'] = True
-        return redirect(url_for('login'))
-    except jwt.ExpiredSignatureError: return "エラー: このQRコードの有効期限が切れています。", 403
-    except jwt.InvalidTokenError: return "エラー: 無効なQRコードです。", 403
+        
+        # Google認証フローを初期化
+        flow = Flow.from_client_secrets_file(
+            CLIENT_SECRETS_FILE,
+            scopes=SCOPES,
+            redirect_uri=url_for('callback', _external=True)
+        )
+        authorization_url, state = flow.authorization_url(
+            access_type='offline',
+            include_granted_scopes='true'
+        )
+        session['state'] = state
+        return redirect(authorization_url)
 
-@app.route('/login')
-def login():
-    flow = Flow.from_client_secrets_file(CLIENT_SECRETS_FILE, scopes=SCOPES, redirect_uri=url_for('callback', _external=True))
-    authorization_url, state = flow.authorization_url()
-    session['state'] = state
-    return redirect(authorization_url)
+    except jwt.ExpiredSignatureError:
+        return "エラー: このQRコードの有効期限が切れています。", 403
+    except jwt.InvalidTokenError:
+        return "エラー: 無効なQRコードです。", 403
+    except Exception as e:
+        print(f"Attend error: {e}")
+        return "サーバーエラーが発生しました。", 500
 
+# --- Google認証後のコールバック処理 ---
 @app.route('/callback')
 def callback():
-    if 'state' not in session or session['state'] != request.args.get('state'): abort(500)
-    flow = Flow.from_client_secrets_file(CLIENT_SECRETS_FILE, scopes=SCOPES, state=session['state'], redirect_uri=url_for('callback', _external=True))
-    flow.fetch_token(authorization_response=request.url)
-    credentials = flow.credentials
-    session['credentials'] = {'token': credentials.token, 'refresh_token': credentials.refresh_token, 'token_uri': credentials.token_uri, 'client_id': credentials.client_id, 'client_secret': credentials.client_secret, 'scopes': credentials.scopes}
-    if session.get('attendance_pending'):
-        session.pop('attendance_pending', None)
-        return redirect(url_for('process_attendance'))
-    return redirect(url_for('success'))
-
-@app.route('/process_attendance')
-def process_attendance():
-    if 'credentials' not in session: return redirect(url_for('login'))
+    """
+    Google認証成功後に呼び出される。
+    ユーザー情報を取得し、スプレッドシートに記録する。
+    """
     try:
-        creds = Credentials(**session['credentials'])
-        user_info_service = build('oauth2', 'v2', credentials=creds)
-        user_info = user_info_service.userinfo().get().execute()
-        if record_attendance(user_info):
-            return redirect(url_for('success'))
-        else:
-            return "エラー: スプレッドシートへの記録に失敗しました。", 500
+        flow = Flow.from_client_secrets_file(
+            CLIENT_SECRETS_FILE,
+            scopes=SCOPES,
+            state=session['state'],
+            redirect_uri=url_for('callback', _external=True)
+        )
+        flow.fetch_token(authorization_response=request.url)
+        
+        credentials = flow.credentials
+        
+        # ユーザー情報を取得
+        userinfo_service = build('oauth2', 'v2', credentials=credentials)
+        user_info = userinfo_service.userinfo().get().execute()
+        
+        email = user_info.get('email')
+        name = user_info.get('name')
+        
+        # スプレッドシートに記録
+        jst = datetime.timezone(datetime.timedelta(hours=9))
+        timestamp = datetime.datetime.now(jst).strftime('%Y-%m-%d %H:%M:%S')
+
+        gc = gspread.service_account(filename=SERVICE_ACCOUNT_FILE)
+        sheet = gc.open(SPREADSHEET_NAME).sheet1
+        sheet.append_row([timestamp, email, name])
+        
+        return "<h1>打刻が完了しました！</h1><p>このページを閉じてください。</p>"
+
     except Exception as e:
-        print(f"出席処理中にエラーが発生しました: {e}")
-        return "エラー: 処理中に問題が発生しました。", 500
+        print(f"Callback error: {e}")
+        return "エラーが発生しました。スプレッドシートへの記録に失敗した可能性があります。", 500
 
-@app.route('/success')
-def success():
-    return """<html><head><title>成功</title></head><body><h1>打刻が完了しました！</h1></body></html>"""
-
-@app.route('/logout')
-def logout():
-    session.clear()
-    return redirect(url_for('index'))
-
-# -----------------------------------------------------------------------------
-# 実行 (gunicornが使うため、この部分はローカル実行時のみ使われる)
-# -----------------------------------------------------------------------------
 if __name__ == '__main__':
-    # ローカルテスト用に、初回QRコードを生成
-    generate_attendance_qr_code()
-    app.run(debug=True, host='0.0.0.0', port=5000)
-
+    # 開発環境で実行する際のポートとデバッグ設定
+    app.run(host='0.0.0.0', port=5000, debug=True)
