@@ -31,11 +31,6 @@ SPREADSHEET_NAME = os.environ.get('SPREADSHEET_NAME', '研究室出欠記録')
 # JWTトークンの暗号化に使う秘密鍵 (環境変数で設定)
 JWT_SECRET = os.environ.get('JWT_SECRET', 'default-jwt-secret-key')
 
-# ★★★ 新しい設定項目 ★★★
-# 書き込み先のワークシート（タブ）の名前を指定
-SPREADSHEET_WORKSHEET_NAME = os.environ.get('SPREADSHEET_WORKSHEET_NAME', '記録')
-JWT_SECRET = os.environ.get('JWT_SECRET', 'default-jwt-secret-key-for-dev')
-
 # --- メインページ ---
 @app.route('/')
 def index():
@@ -50,7 +45,7 @@ def qr_image():
         expiration_time = now.replace(hour=23, minute=59, second=59, microsecond=0)
         
         payload = {'exp': expiration_time, 'iat': now}
-        token = jwt.encode(payload, JWT_SECRET, algorithm='HS256')
+        token = jwt.encode(payload, JWT_SECRET, algorithm='HS265')
         
         base_url = request.host_url
         qr_url = f"{base_url}attend?token={token}"
@@ -119,22 +114,29 @@ def callback():
         gc = gspread.service_account(filename=SERVICE_ACCOUNT_FILE)
         spreadsheet = gc.open(SPREADSHEET_NAME)
         
-        # ★★★ ここが変更点 ★★★
-        # '.sheet1'ではなく、名前でワークシートを正確に指定する
-        sheet = spreadsheet.worksheet(SPREADSHEET_WORKSHEET_NAME)
+        # ★★★ ここを差し戻し ★★★
+        # ワークシート名を指定せず、一番左のシート（.sheet1）を対象にする
+        sheet = spreadsheet.sheet1
         
-        sheet.append_row([timestamp, email, name])
+        # 'append_row'ではなく、A列の最終行を基準に行を「挿入」する方式に変更
+        # これにより、他の列にデータがあっても正しく記録欄の末尾に追加される
+        
+        # A列（1列目）のすべての値を取得
+        col_values = sheet.col_values(1)
+        # 次に挿入する行番号を計算（A列の最後のデータ行 + 1）
+        insert_row_index = len(col_values) + 1
+        
+        # 計算した行番号に、新しい行を挿入する
+        sheet.insert_row([timestamp, email, name], insert_row_index)
         
         return "<h1>打刻が完了しました！</h1><p>このページを閉じてください。</p>"
 
-    except gspread.exceptions.WorksheetNotFound:
-        error_message = f"エラー: スプレッドシートに '{SPREADSHEET_WORKSHEET_NAME}' という名前のシート（タブ）が見つかりません。"
-        print(error_message)
-        return error_message, 500
     except Exception as e:
         print(f"Callback error: {e}")
         return "エラーが発生しました。スプレッドシートへの記録に失敗した可能性があります。", 500
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=True)
+
+
 
