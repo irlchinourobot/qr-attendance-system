@@ -45,7 +45,7 @@ def qr_image():
         expiration_time = now.replace(hour=23, minute=59, second=59, microsecond=0)
         
         payload = {'exp': expiration_time, 'iat': now}
-        token = jwt.encode(payload, JWT_SECRET, algorithm='HS265')
+        token = jwt.encode(payload, JWT_SECRET, algorithm='HS256')
         
         base_url = request.host_url
         qr_url = f"{base_url}attend?token={token}"
