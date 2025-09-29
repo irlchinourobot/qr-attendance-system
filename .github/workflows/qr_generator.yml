@@ -1,0 +1,15 @@
+name: Generate Daily QR Code
+
+on:
+  schedule:
+    # UTCの毎日20:00 (日本時間の午前5:00) に実行
+    - cron: '0 20 * * *'
+  # 手動実行もできるようにする
+  workflow_dispatch:
+
+jobs:
+  generate-qr:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call QR Generation URL
+        run: curl "https://qr-attendance-system-sz6s.onrender.com/cron/generate-qr?secret=${{ secrets.CRON_SECRET }}"
