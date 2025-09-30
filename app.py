@@ -5,12 +5,12 @@ import jwt
 import gspread
 import qrcode
 import io
-from flask import Flask, render_template, request, redirect, session, url_for, send_file, jsonify
+from flask import Flask, render_template, request, redirect, session, url_for, send_file
 from google_auth_oauthlib.flow import Flow
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
-from haversine import haversine, Unit # 距離計算ライブラリ
+
 # -----------------------------------------------------------------------------
 # 初期設定
 # -----------------------------------------------------------------------------
@@ -31,32 +31,10 @@ SPREADSHEET_NAME = os.environ.get('SPREADSHEET_NAME', '研究室出欠記録')
 # JWTトークンの暗号化に使う秘密鍵 (環境変数で設定)
 JWT_SECRET = os.environ.get('JWT_SECRET', 'default-jwt-secret-key')
 
-
-# ★★★ IPアドレス制限の設定 ★★★
-# ここに許可したいIPアドレスの「前方部分」をリストで指定します。
-# このIPからのアクセスはGPS認証が免除されます。
-ALLOWED_IP_PREFIXES = [
-    '127.0.0.1', # ローカル開発用
-     '133.7.7.240', # 例: 大学のネットワーク1
-    # '203.0.113.',   # 例: 大学のネットワーク2
-]
-
-# ★★★ GPS設定 ★★★
-# 教室の緯度・経度を設定
-CLASSROOM_LAT = 36.0760254  # 例: 福井大学の緯度
-CLASSROOM_LON = 136.2129435 # 例: 福井大学の経度
-# 判定を許可する半径 (メートル)
-MAX_DISTANCE_METERS = 100 
-
-# -----------------------------------------------------------------------------
-# ルーティング
-# -----------------------------------------------------------------------------
-
-# --- メインページ (QRコード表示) ---
+# --- メインページ ---
 @app.route('/')
 def index():
-    # 'qr_display' モードで index.html を表示
-    return render_template('index.html', mode='qr_display')
+    return render_template('index.html')
 
 # --- 動的なQRコード画像生成 ---
 @app.route('/qr_image.png')
@@ -64,106 +42,61 @@ def qr_image():
     try:
         jst = datetime.timezone(datetime.timedelta(hours=9))
         now = datetime.datetime.now(jst)
-        # ★★★ 有効期限を10分に延長 ★★★
-        expiration_time = now + datetime.timedelta(minutes=10)
+        expiration_time = now.replace(hour=23, minute=59, second=59, microsecond=0)
         
-        payload = {'exp': expiration_time.timestamp(), 'iat': now.timestamp()}
+        payload = {'exp': expiration_time, 'iat': now}
         token = jwt.encode(payload, JWT_SECRET, algorithm='HS256')
         
-        qr_url = url_for('attend', token=token, _external=True)
+        base_url = request.host_url
+        qr_url = f"{base_url}attend?token={token}"
 
         qr_img = qrcode.make(qr_url)
+        
         img_io = io.BytesIO()
         qr_img.save(img_io, 'PNG')
         img_io.seek(0)
+        
         return send_file(img_io, mimetype='image/png')
     except Exception as e:
         print(f"Error generating QR code: {e}")
-        return "Error", 500
+        return "Error generating QR code", 500
 
-# --- 打刻処理の開始 (IP/GPS分岐) ---
+# --- 打刻処理の開始 ---
 @app.route('/attend')
 def attend():
     token = request.args.get('token')
     if not token:
-        return render_template('index.html', mode='error', message="トークンがありません。"), 400
+        return "エラー: トークンがありません。", 400
 
     try:
         jwt.decode(token, JWT_SECRET, algorithms=['HS256'])
-        
-        client_ip = request.headers.get('X-Forwarded-For', request.remote_addr)
-        is_ip_allowed = any(client_ip.startswith(prefix) for prefix in ALLOWED_IP_PREFIXES)
-
-        if is_ip_allowed:
-            print(f"IP address {client_ip} is allowed. Skipping GPS check.")
-            flow = Flow.from_client_secrets_file(
-                CLIENT_SECRETS_FILE, scopes=SCOPES, redirect_uri=url_for('callback', _external=True)
-            )
-            authorization_url, state = flow.authorization_url(
-                access_type='offline',
-                include_granted_scopes='true',
-                prompt='select_account' # ★★★ アカウント選択画面を強制表示 ★★★
-            )
-            session['state'] = state
-            # ★★★ JSでリダイレクトさせるモード ★★★
-            return render_template('index.html', mode='redirect', redirect_url=authorization_url)
-        else:
-            print(f"IP address {client_ip} is not allowed. Proceeding to GPS check.")
-            # ★★★ GPS確認モードで表示 ★★★
-            return render_template('index.html', mode='gps_check', token=token)
-
+        flow = Flow.from_client_secrets_file(
+            CLIENT_SECRETS_FILE,
+            scopes=SCOPES,
+            redirect_uri=url_for('callback', _external=True)
+        )
+        authorization_url, state = flow.authorization_url(
+            access_type='offline',
+            include_granted_scopes='true'
+        )
+        session['state'] = state
+        return redirect(authorization_url)
     except jwt.ExpiredSignatureError:
-        return render_template('index.html', mode='error', message="QRコードの有効期限が切れています。ページを更新して再試行してください。"), 403
+        return "エラー: このQRコードの有効期限が切れています。", 403
     except jwt.InvalidTokenError:
-        return render_template('index.html', mode='error', message="無効なQRコードです。"), 403
+        return "エラー: 無効なQRコードです。", 403
     except Exception as e:
         print(f"Attend error: {e}")
-        return render_template('index.html', mode='error', message="サーバーエラーが発生しました。"), 500
-
-# --- 位置情報を検証し、Google認証へ進むAPI ---
-@app.route('/verify_location', methods=['POST'])
-def verify_location():
-    data = request.get_json()
-    token = data.get('token')
-    lat = data.get('latitude')
-    lon = data.get('longitude')
-
-    if not all([token, lat, lon]):
-        return jsonify({'success': False, 'message': 'データが不足しています。'})
-
-    try:
-        jwt.decode(token, JWT_SECRET, algorithms=['HS256'])
-        
-        user_location = (lat, lon)
-        classroom_location = (CLASSROOM_LAT, CLASSROOM_LON)
-        distance = haversine(user_location, classroom_location, unit=Unit.METERS)
-        
-        if distance <= MAX_DISTANCE_METERS:
-            flow = Flow.from_client_secrets_file(
-                CLIENT_SECRETS_FILE, scopes=SCOPES, redirect_uri=url_for('callback', _external=True)
-            )
-            authorization_url, state = flow.authorization_url(
-                access_type='offline',
-                include_granted_scopes='true',
-                prompt='select_account' # ★★★ アカウント選択画面を強制表示 ★★★
-            )
-            session['state'] = state
-            return jsonify({'success': True, 'redirect_url': authorization_url})
-        else:
-            return jsonify({'success': False, 'message': f'教室から {int(distance)}m 離れています。教室に入ってから再試行してください。'})
-
-    except (jwt.ExpiredSignatureError, jwt.InvalidTokenError):
-        return jsonify({'success': False, 'message': 'QRコードの有効期限が切れました。最初のページに戻って更新してください。'})
-    except Exception as e:
-        print(f"Verify location error: {e}")
-        return jsonify({'success': False, 'message': 'サーバーでエラーが発生しました。'})
+        return "サーバーエラーが発生しました。", 500
 
 # --- Google認証後のコールバック処理 ---
 @app.route('/callback')
 def callback():
     try:
         flow = Flow.from_client_secrets_file(
-            CLIENT_SECRETS_FILE, scopes=SCOPES, state=session['state'],
+            CLIENT_SECRETS_FILE,
+            scopes=SCOPES,
+            state=session['state'],
             redirect_uri=url_for('callback', _external=True)
         )
         flow.fetch_token(authorization_response=request.url)
@@ -180,21 +113,29 @@ def callback():
 
         gc = gspread.service_account(filename=SERVICE_ACCOUNT_FILE)
         spreadsheet = gc.open(SPREADSHEET_NAME)
+        
+        # ★★★ ここを差し戻し ★★★
+        # ワークシート名を指定せず、一番左のシート（.sheet1）を対象にする
         sheet = spreadsheet.sheet1
         
+        # 'append_row'ではなく、A列の最終行を基準に行を「挿入」する方式に変更
+        # これにより、他の列にデータがあっても正しく記録欄の末尾に追加される
+        
+        # A列（1列目）のすべての値を取得
         col_values = sheet.col_values(1)
+        # 次に挿入する行番号を計算（A列の最後のデータ行 + 1）
         insert_row_index = len(col_values) + 1
         
+        # 計算した行番号に、新しい行を挿入する
         sheet.insert_row([timestamp, email, name], insert_row_index)
         
-        # ★★★ 成功モードで表示 ★★★
-        return render_template('index.html', mode='success', message="打刻が完了しました！")
+        return "<h1>打刻が完了しました！</h1><p>このページを閉じてください。</p>"
 
     except Exception as e:
         print(f"Callback error: {e}")
-        # ★★★ エラーモードで表示 ★★★
-        return render_template('index.html', mode='error', message="エラーが発生しました。スプレッドシートへの記録に失敗した可能性があります。"), 500
+        return "エラーが発生しました。スプレッドシートへの記録に失敗した可能性があります。", 500
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 8080)))
+    app.run(host='0.0.0.0', port=5000, debug=True)
+
 
