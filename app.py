@@ -100,7 +100,9 @@ def attend():
                 CLIENT_SECRETS_FILE, scopes=SCOPES, redirect_uri=url_for('callback', _external=True)
             )
             authorization_url, state = flow.authorization_url(
-                access_type='offline', include_granted_scopes='true'
+                access_type='offline',
+                include_granted_scopes='true',
+                prompt='select_account' # ★★★ アカウント選択画面を強制表示 ★★★
             )
             session['state'] = state
             # ★★★ JSでリダイレクトさせるモード ★★★
@@ -141,7 +143,9 @@ def verify_location():
                 CLIENT_SECRETS_FILE, scopes=SCOPES, redirect_uri=url_for('callback', _external=True)
             )
             authorization_url, state = flow.authorization_url(
-                access_type='offline', include_granted_scopes='true'
+                access_type='offline',
+                include_granted_scopes='true',
+                prompt='select_account' # ★★★ アカウント選択画面を強制表示 ★★★
             )
             session['state'] = state
             return jsonify({'success': True, 'redirect_url': authorization_url})
