@@ -64,7 +64,8 @@ def qr_image():
     try:
         jst = datetime.timezone(datetime.timedelta(hours=9))
         now = datetime.datetime.now(jst)
-        expiration_time = now + datetime.timedelta(seconds=30)
+        # ★★★ 有効期限を10分に延長 ★★★
+        expiration_time = now + datetime.timedelta(minutes=10)
         
         payload = {'exp': expiration_time.timestamp(), 'iat': now.timestamp()}
         token = jwt.encode(payload, JWT_SECRET, algorithm='HS256')
