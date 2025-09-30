@@ -55,7 +55,8 @@ MAX_DISTANCE_METERS = 100
 # --- メインページ (QRコード表示) ---
 @app.route('/')
 def index():
-    return render_template('index.html')
+    # 'qr_display' モードで index.html を表示
+    return render_template('index.html', mode='qr_display')
 
 # --- 動的なQRコード画像生成 ---
 @app.route('/qr_image.png')
@@ -79,51 +80,44 @@ def qr_image():
         print(f"Error generating QR code: {e}")
         return "Error", 500
 
-# --- ★★★ 打刻処理の開始 (IP/GPS分岐) ★★★ ---
+# --- 打刻処理の開始 (IP/GPS分岐) ---
 @app.route('/attend')
 def attend():
     token = request.args.get('token')
     if not token:
-        return render_template('error.html', message="トークンがありません。"), 400
+        return render_template('index.html', mode='error', message="トークンがありません。"), 400
 
     try:
-        # トークンを検証
         jwt.decode(token, JWT_SECRET, algorithms=['HS256'])
         
-        # IPアドレスをチェック
-        # Render環境では X-Forwarded-For ヘッダに元のIPアドレスが入る
         client_ip = request.headers.get('X-Forwarded-For', request.remote_addr)
         is_ip_allowed = any(client_ip.startswith(prefix) for prefix in ALLOWED_IP_PREFIXES)
 
         if is_ip_allowed:
-            # IPが許可リストにあれば、GPSをスキップして直接Google認証へ
             print(f"IP address {client_ip} is allowed. Skipping GPS check.")
             flow = Flow.from_client_secrets_file(
-                CLIENT_SECRETS_FILE,
-                scopes=SCOPES,
-                redirect_uri=url_for('callback', _external=True)
+                CLIENT_SECRETS_FILE, scopes=SCOPES, redirect_uri=url_for('callback', _external=True)
             )
             authorization_url, state = flow.authorization_url(
-                access_type='offline',
-                include_granted_scopes='true'
+                access_type='offline', include_granted_scopes='true'
             )
             session['state'] = state
-            return redirect(authorization_url)
+            # ★★★ JSでリダイレクトさせるモード ★★★
+            return render_template('index.html', mode='redirect', redirect_url=authorization_url)
         else:
-            # IPが許可リストになければ、GPS認証ページへ
             print(f"IP address {client_ip} is not allowed. Proceeding to GPS check.")
-            return render_template('attend_gps.html', token=token)
+            # ★★★ GPS確認モードで表示 ★★★
+            return render_template('index.html', mode='gps_check', token=token)
 
     except jwt.ExpiredSignatureError:
-        return render_template('error.html', message="QRコードの有効期限が切れています。ページを更新して再試行してください。"), 403
+        return render_template('index.html', mode='error', message="QRコードの有効期限が切れています。ページを更新して再試行してください。"), 403
     except jwt.InvalidTokenError:
-        return render_template('error.html', message="無効なQRコードです。"), 403
+        return render_template('index.html', mode='error', message="無効なQRコードです。"), 403
     except Exception as e:
         print(f"Attend error: {e}")
-        return render_template('error.html', message="サーバーエラーが発生しました。"), 500
+        return render_template('index.html', mode='error', message="サーバーエラーが発生しました。"), 500
 
 # --- 位置情報を検証し、Google認証へ進むAPI ---
-# (GPS版のコードから変更なし)
 @app.route('/verify_location', methods=['POST'])
 def verify_location():
     data = request.get_json()
@@ -143,9 +137,7 @@ def verify_location():
         
         if distance <= MAX_DISTANCE_METERS:
             flow = Flow.from_client_secrets_file(
-                CLIENT_SECRETS_FILE,
-                scopes=SCOPES,
-                redirect_uri=url_for('callback', _external=True)
+                CLIENT_SECRETS_FILE, scopes=SCOPES, redirect_uri=url_for('callback', _external=True)
             )
             authorization_url, state = flow.authorization_url(
                 access_type='offline', include_granted_scopes='true'
@@ -162,7 +154,6 @@ def verify_location():
         return jsonify({'success': False, 'message': 'サーバーでエラーが発生しました。'})
 
 # --- Google認証後のコールバック処理 ---
-# (変更なし)
 @app.route('/callback')
 def callback():
     try:
@@ -191,11 +182,14 @@ def callback():
         
         sheet.insert_row([timestamp, email, name], insert_row_index)
         
-        return render_template('success.html', message="打刻が完了しました！")
+        # ★★★ 成功モードで表示 ★★★
+        return render_template('index.html', mode='success', message="打刻が完了しました！")
 
     except Exception as e:
         print(f"Callback error: {e}")
-        return render_template('error.html', message="エラーが発生しました。スプレッドシートへの記録に失敗した可能性があります。"), 500
+        # ★★★ エラーモードで表示 ★★★
+        return render_template('index.html', mode='error', message="エラーが発生しました。スプレッドシートへの記録に失敗した可能性があります。"), 500
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 8080)))
+
