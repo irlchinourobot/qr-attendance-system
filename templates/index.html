@@ -1,49 +1,229 @@
-    <!DOCTYPE html>
-    <html lang="ja">
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <!-- ★★★ 追加：600秒（10分）ごとにページを自動更新し、Renderサーバーのスリープを防ぐ ★★★ -->
-        <meta http-equiv="refresh" content="600">
-        <title>本日の出欠QRコード</title>
-        <style>
-            body {
-                display: flex;
-                justify-content: center;
-                align-items: center;
-                height: 100vh;
-                margin: 0;
-                background-color: #f0f0f0;
-                font-family: sans-serif;
-                flex-direction: column;
-            }
-            .container {
-                text-align: center;
-                padding: 40px;
-                background-color: white;
-                border-radius: 15px;
-                box-shadow: 0 4px 8px rgba(0,0,0,0.1);
-            }
-            h1 {
-                color: #333;
-                margin-bottom: 20px;
-            }
-            img {
-                width: 300px;
-                height: 300px;
-                border: 1px solid #ddd;
-                padding: 10px;
-                border-radius: 10px;
-            }
-        </style>
-    </head>
-    <body>
-        <div class="container">
-            <h1>本日の出欠QRコード</h1>
-            <!-- このimgタグがサーバーの /qr_image.png を直接呼び出す -->
-            <img src="/qr_image.png" alt="Attendance QR Code">
-            <p>スマートフォンでスキャンしてください</p>
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>出席管理システム</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            margin: 0;
+            background-color: #f0f2f5;
+        }
+        .container {
+            text-align: center;
+            background-color: white;
+            padding: 30px 40px;
+            border-radius: 12px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+            max-width: 90%;
+        }
+        /* 各ビューのスタイル */
+        .view {
+            display: none; /* 初期状態ではすべて非表示 */
+        }
+        
+        /* QRコードビュー */
+        #qr-display-view h1 { color: #333; margin-top: 0; }
+        #qr-code-container { margin-top: 20px; width: 256px; height: 256px; position: relative; margin-left:auto; margin-right:auto; }
+        #qr-code { width: 100%; height: 100%; transition: opacity 0.5s ease-in-out; }
+        #countdown { margin-top: 15px; font-size: 1.2em; color: #555; }
+
+        /* GPSビュー */
+        #gps-check-view h1 { color: #333; font-size: 1.5em; }
+        #gps-check-view p { color: #555; margin-bottom: 25px; }
+        #gps-check-view button { background-color: #007bff; color: white; border: none; padding: 12px 24px; border-radius: 8px; font-size: 1em; cursor: pointer; transition: background-color 0.3s; }
+        #gps-check-view button:disabled { background-color: #a0cfff; cursor: not-allowed; }
+        #gps-check-view button:hover:enabled { background-color: #0056b3; }
+        #gps-status { margin-top: 20px; font-weight: bold; }
+        
+        /* 結果表示ビュー */
+        .result-view h1 { font-size: 1.8em; }
+        #success-view h1 { color: #28a745; }
+        #error-view h1 { color: #dc3545; }
+        .result-view p { font-size: 1.1em; }
+
+        /* 共通スタイル */
+        .error-text { color: #dc3545; }
+        .success-text { color: #28a745; }
+    </style>
+</head>
+<body>
+    <div class="container">
+
+        <!-- ===== QRコード表示部 ===== -->
+        <div id="qr-display-view" class="view">
+            <h1>出席用のQRコードをスキャンしてください</h1>
+            <div id="qr-code-container">
+                <img id="qr-code" src="/qr_image.png" alt="QR Code">
+            </div>
+            <div id="countdown">次の更新まで: 10分00秒</div>
         </div>
-    </body>
-    </html>
-    
+
+        <!-- ===== GPS位置情報確認部 ===== -->
+        <div id="gps-check-view" class="view">
+            <h1>出席を記録します</h1>
+            <p>現在地を確認して出席を完了します。<br>ブラウザの位置情報利用を許可してください。</p>
+            <button id="attend-button">現在地を確認して出席する</button>
+            <div id="gps-status"></div>
+        </div>
+
+        <!-- ===== 成功表示部 ===== -->
+        <div id="success-view" class="result-view view">
+            <h1>✅ {{ message|default('', true) }}</h1>
+            <p>このページは閉じてください。</p>
+        </div>
+
+        <!-- ===== エラー表示部 ===== -->
+        <div id="error-view" class="result-view view">
+            <h1>❌ エラー</h1>
+            <p>{{ message|default('不明なエラーが発生しました。', true) }}</p>
+            <p><a href="/">トップページに戻る</a></p>
+        </div>
+        
+        <!-- ===== リダイレクト中表示部 ===== -->
+        <div id="redirect-view" class="result-view view">
+            <h1>認証ページへ移動します...</h1>
+            <p>しばらくお待ちください。</p>
+        </div>
+    </div>
+
+    <script>
+        // --- Flaskから渡された情報をJS変数に格納 ---
+        const MODE = "{{ mode|default('error', true) }}";
+        const TOKEN = "{{ token|default('', true) }}";
+        const REDIRECT_URL = "{{ redirect_url|default('', true) }}";
+        
+        // --- モードに応じて表示を切り替える ---
+        window.onload = () => {
+            let viewToShow;
+            switch(MODE) {
+                case 'qr_display':
+                    viewToShow = document.getElementById('qr-display-view');
+                    initializeQrDisplay();
+                    break;
+                case 'gps_check':
+                    viewToShow = document.getElementById('gps-check-view');
+                    initializeGpsCheck();
+                    break;
+                case 'success':
+                    viewToShow = document.getElementById('success-view');
+                    break;
+                case 'error':
+                    viewToShow = document.getElementById('error-view');
+                    break;
+                case 'redirect':
+                    viewToShow = document.getElementById('redirect-view');
+                    window.location.href = REDIRECT_URL;
+                    break;
+                default:
+                    viewToShow = document.getElementById('error-view');
+            }
+            if (viewToShow) {
+                viewToShow.style.display = 'block';
+            }
+        };
+
+        // --- QRコード表示モードの初期化 ---
+        function initializeQrDisplay() {
+            const qrImage = document.getElementById('qr-code');
+            const countdownElement = document.getElementById('countdown');
+            const UPDATE_INTERVAL = 600; // 10分 = 600秒
+            let countdown = UPDATE_INTERVAL;
+
+            function refreshQRCode() {
+                qrImage.style.opacity = 0;
+                setTimeout(() => {
+                    qrImage.src = '/qr_image.png?' + new Date().getTime();
+                    qrImage.style.opacity = 1;
+                }, 500);
+                countdown = UPDATE_INTERVAL;
+            }
+
+            function updateCountdown() {
+                countdown--;
+                const minutes = Math.floor(countdown / 60);
+                const seconds = (countdown % 60).toString().padStart(2, '0');
+                countdownElement.textContent = `次の更新まで: ${minutes}分${seconds}秒`;
+                if (countdown <= 0) {
+                    refreshQRCode();
+                }
+            }
+            setInterval(updateCountdown, 1000);
+        }
+
+        // --- GPSチェックモードの初期化 ---
+        function initializeGpsCheck() {
+            const attendButton = document.getElementById('attend-button');
+            const statusElement = document.getElementById('gps-status');
+
+            attendButton.addEventListener('click', () => {
+                statusElement.textContent = '位置情報を取得中...';
+                statusElement.className = '';
+                attendButton.disabled = true;
+
+                if (!navigator.geolocation) {
+                    statusElement.textContent = 'エラー: お使いのブラウザは位置情報に対応していません。';
+                    statusElement.className = 'error-text';
+                    attendButton.disabled = false;
+                    return;
+                }
+
+                navigator.geolocation.getCurrentPosition(
+                    (position) => {
+                        const { latitude, longitude } = position.coords;
+                        statusElement.textContent = `位置情報を取得しました。サーバーで検証中...`;
+                        verifyLocation(latitude, longitude);
+                    },
+                    (error) => {
+                        let message = '';
+                        switch (error.code) {
+                            case error.PERMISSION_DENIED: message = '位置情報の利用が拒否されました。設定を確認してください。'; break;
+                            case error.POSITION_UNAVAILABLE: message = '位置情報を取得できませんでした。'; break;
+                            case error.TIMEOUT: message = '位置情報の取得がタイムアウトしました。'; break;
+                            default: message = '不明なエラーが発生しました。'; break;
+                        }
+                        statusElement.textContent = `エラー: ${message}`;
+                        statusElement.className = 'error-text';
+                        attendButton.disabled = false;
+                    },
+                    { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
+                );
+            });
+        }
+        
+        // --- サーバーに位置情報を送信する関数 ---
+        async function verifyLocation(latitude, longitude) {
+            const statusElement = document.getElementById('gps-status');
+            const attendButton = document.getElementById('attend-button');
+            try {
+                const response = await fetch('/verify_location', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ token: TOKEN, latitude, longitude }),
+                });
+                const result = await response.json();
+
+                if (result.success) {
+                    statusElement.textContent = '認証が完了しました。Googleにリダイレクトします...';
+                    statusElement.className = 'success-text';
+                    window.location.href = result.redirect_url;
+                } else {
+                    statusElement.textContent = `エラー: ${result.message}`;
+                    statusElement.className = 'error-text';
+                    attendButton.disabled = false;
+                }
+            } catch (error) {
+                statusElement.textContent = 'エラー: サーバーとの通信に失敗しました。';
+                statusElement.className = 'error-text';
+                attendButton.disabled = false;
+            }
+        }
+    </script>
+</body>
+</html>
+
