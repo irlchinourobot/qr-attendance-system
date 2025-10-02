@@ -102,7 +102,7 @@ def attend():
             authorization_url, state = flow.authorization_url(
                 access_type='offline',
                 include_granted_scopes='true',
-                prompt='select_account'
+                prompt='consent select_account'
             )
             session['state'] = state
             # ★★★ v2と同様のサーバーサイドリダイレクトに変更 ★★★
@@ -145,7 +145,7 @@ def verify_location():
             authorization_url, state = flow.authorization_url(
                 access_type='offline',
                 include_granted_scopes='true',
-                prompt='select_account' # ★★★ アカウント選択画面を強制表示 ★★★
+                prompt='consent select_account'
             )
             session['state'] = state
             return jsonify({'success': True, 'redirect_url': authorization_url})
