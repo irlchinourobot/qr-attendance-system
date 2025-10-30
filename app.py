@@ -182,10 +182,8 @@ def callback():
         spreadsheet = gc.open(SPREADSHEET_NAME)
         sheet = spreadsheet.sheet1
         
-        col_values = sheet.col_values(1)
-        insert_row_index = len(col_values) + 1
-        
-        sheet.insert_row([timestamp, email, name], insert_row_index)
+        # 常に2行目に新しいデータを挿入する (1行目はヘッダーと仮定)
+        sheet.insert_row([timestamp, email, name], 2)
         
         # ★★★ 成功モードで表示 ★★★
         return render_template('index.html', mode='success', message="打刻が完了しました！")
