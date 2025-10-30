@@ -184,6 +184,52 @@ def callback():
         
         # 常に2行目に新しいデータを挿入する (1行目はヘッダーと仮定)
         sheet.insert_row([timestamp, email, name], 2)
+
+        MAX_ROWS_WITH_HEADER = 10001 
+        
+        try:
+            current_row_count = sheet.row_count
+            
+            if current_row_count > MAX_ROWS_WITH_HEADER:
+                print(f"Row count {current_row_count} exceeded limit {MAX_ROWS_WITH_HEADER}. Starting backup (A:H)...")
+                
+                # 1. バックアップ対象のデータを取得 (A列からH列まで)
+                start_backup_row_index = MAX_ROWS_WITH_HEADER + 1
+                
+                # ★★★ 修正点: A列からH列まで取得 ★★★
+                old_data = sheet.get(f'A{start_backup_row_index}:H{current_row_count}')
+                
+                # 2. ヘッダー行を取得 (A列からH列まで)
+                # ★★★ 修正点: A1からH1までを明示的に取得 ★★★
+                header = sheet.get('A1:H1')[0] 
+                
+                # 3. 新しいバックアップシートを作成
+                backup_sheet_name = f"Backup_{now.strftime('%Y%m%d_%H%M')}"
+                
+                # ★★★ 修正点: 列数を8に変更 ★★★
+                backup_sheet = spreadsheet.add_worksheet(
+                    title=backup_sheet_name, 
+                    rows=len(old_data) + 1, # 必要な行数+ヘッダー
+                    cols=8  # A～H列の8列
+                )
+                
+                # 4. ヘッダーとデータを新シートに書き込む (A列～H列)
+                # ★★★ 修正点: 書き込み範囲を明示 (A1からHの最後まで) ★★★
+                backup_sheet.update(
+                    f'A1:H{len(old_data) + 1}', 
+                    [header] + old_data,
+                    value_input_option='USER_ENTERED' # 関数の場合、関数としてペースト
+                )
+                
+                # 5. 元シートの古いデータを削除 (バックアップ成功後)
+                sheet.delete_rows(start_backup_row_index, current_row_count)
+                
+                print(f"Backup successful. Moved {len(old_data)} rows (A:H) to sheet '{backup_sheet_name}'.")
+
+        except Exception as e_backup:
+            # バックアップ処理でエラーが起きても、打刻自体は成功している
+            print(f"Error during sheet backup process: {e_backup}")
+        # --- バックアップ処理ここまで ---
         
         # ★★★ 成功モードで表示 ★★★
         return render_template('index.html', mode='success', message="打刻が完了しました！")
